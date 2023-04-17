@@ -11,13 +11,17 @@ editor_options:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+1. Installing Packages
 ```{r Packages}
 library(dplyr)
 library(tidyr)
 library(stringr)
+library(forcats)
 library(ggplot2)
+library(rstatix)
 ```
 
+2. Data Import, Cleaning, Computing, and Subsetting
 ```{r Data Import, Cleaning, and Subsetting}
 df <- read.csv("./data/Primary_Data.csv", 
                check.names = FALSE,
@@ -27,14 +31,28 @@ df <- as_tibble(df) %>%
   mutate(across(.cols = "Live T cells":ncol(df),
                 .fns = function(x) str_replace_all(x, "%", ""))) %>%
   mutate(across(.cols = "Live T cells":ncol(df),
-                .fns = function(x) as.numeric(x)))
+                .fns = function(x) as.numeric(x))) %>%
+  rename(`Bulk Memory GrzB+Perf+` = `Bulk Memory GrzB+Perfr+`)
+
+#compute CD4/CD8 T cell ratio and single positive marker frerquencies
+df <- df %>% 
+  mutate("CD4/CD8 Ratio" = `CD4+ T cells`/`CD8+ T cells`) %>%
+  mutate("Bulk Memory CCR7+" = `Bulk Memory CD45RA-CCR7+` + `Bulk Memory CD45RA+CCR7+`) %>%
+  mutate("Bulk Memory CD45RA+" = `Bulk Memory CD45RA+CCR7-` + `Bulk Memory CD45RA+CCR7+`) %>%
+  mutate("Bulk Memory Tbet+" = `Bulk Memory Tbet+Eomes-` + `Bulk Memory Tbet+Eomes+`) %>%
+  mutate("Bulk Memory Eomes+" = `Bulk Memory Tbet-Eomes+` + `Bulk Memory Tbet+Eomes+`) %>%
+  mutate("Bulk Memory GrzB+" = `Bulk Memory GrzB+Perf-` + `Bulk Memory GrzB+Perf+`) %>%
+  mutate("Bulk Memory Perf+" = `Bulk Memory GrzB-Perf+` + `Bulk Memory GrzB+Perf+`) %>%
+  mutate("Bulk Memory CD69+" = `Bulk Memory CD69+CD103-` + `Bulk Memory CD69+CD103+`) %>%
+  mutate("Bulk Memory CD103+" = `Bulk Memory CD69-CD103+` + `Bulk Memory CD69+CD103+`)
 
 #create a table for bulk memory T cell values only
 dfBulk <- df %>%
   select(!starts_with("Tet-", ignore.case = TRUE)) %>%
-  filter(Tet_Mix == "A" | Tet_Mix == "None" | Tet_Mix == "Combo")
+  filter(Tet_Mix == "A" | Tet_Mix == "None" | Tet_Mix == "Combo") %>%
+  select(-"Bulk Memory CD45RA+ 2")
 
-#create a table of islet supernatants to keep. Filtered CD8+ T cell count >= 100 and the highest islet purity available.
+#create a table of islet supernatants to keep. Filtered CD8+ T cell count >= 100 and the highest islet purity available. Also create a duplicate table compatible with statistical comparison packages.
 dfBulkSup <- dfBulk %>%
   filter(Tissue == "Islet-Sup") %>%
   filter(`CD8+ T cells Count` >= 100) %>%
@@ -49,6 +67,9 @@ dfBulkSup <- dfBulk %>%
            File_Name != "NoTetra_fresh_HPAP047_LPsup_d1.fcs" &
            File_Name != "All_Tetra_HPAP032_SupD3_lowpure.fcs")
 
+dfBulkSupStats <- dfBulkSup
+colnames(dfBulkSupStats) <- gsub(" ", "_", colnames(dfBulkSupStats))
+
 #take the bulk memory table and merge it with the subset islet supernatant samples
 dfBulk <- dfBulk %>%
   filter(Tissue != "Islet-Sup") %>%
@@ -56,29 +77,656 @@ dfBulk <- dfBulk %>%
 
 #creating ggplot-ready data frames
 dfBulk <- pivot_longer(dfBulk, `CD8+ T cells Count`:ncol(dfBulk), names_to = "Metric", values_to = "Value")
+dfBulkSup <- pivot_longer(dfBulkSup, `CD8+ T cells Count`:ncol(dfBulkSup), names_to = "Metric", values_to = "Value")
+```   
+
+3. Defining Common Graph Metrics
+```{r Define Common Graph Metrics}
+
+hpapPalette <- c("#2E96FF","#949494", "#FF8B3D")
+hpapShapes <- c(21, 22, 23)
+hpapDiseaseLevels <- factor(c("ND", "AAb+", "T1D"), levels = c("ND", "AAb+", "T1D"))
 ```
 
-```{r Islet Supernatants Figure}
-#looking at percent of CD4+, CD8+, and double negative T cells in islet supernatant
-percentCD3 <- dfBulk %>%
-  filter(Tissue == "Islet-Sup") %>%
+4. Islet Supernatant Plots
+```{r Islet Supernatant: Comparing all immune populations to donor metrics}
+#Correlate age to immune populations
+IsletSup_Age_AllMetrics <- dfBulkSup %>%
+  pivot_wider(names_from = Metric, values_from = Value) %>%
+  relocate("CD8+ T cells Count" ,.after = File_Name) %>%
+  pivot_longer(cols = "Live T cells" : "Bulk Memory CD103+", 
+               names_to = "Metric", values_to = "Value") %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(Age, Value, color = Disease_State)) +
+  geom_point() +
+  scale_color_manual(values = hpapPalette) +
+  theme_classic() +
+  facet_wrap(vars(Metric), scales = "free_y") +
+  theme(strip.text = element_text(size = 6))
+IsletSup_Age_AllMetrics
+
+#Correlate number of AAbs to immune populations
+IsletSup_AAbN_AllMetrics <- dfBulkSup %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(AAb_N, Value, color = Disease_State)) +
+  geom_point() +
+  scale_color_manual(values = hpapPalette) +
+  theme_classic() +
+  facet_wrap(vars(Metric), scales = "free_y") +
+  theme(strip.text = element_text(size = 6))
+IsletSup_AAbN_AllMetrics
+
+#Correlate sex to immune populations
+IsletSup_Sex_AllMetrics <- dfBulkSup %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(Sex, Value, color = Disease_State)) +
+  geom_jitter(width = 0.2) +
+  scale_color_manual(values = hpapPalette) +
+  theme_classic() +
+  facet_wrap(vars(Metric), scales = "free_y") +
+  theme(strip.text = element_text(size = 6))
+IsletSup_Sex_AllMetrics
+
+#Correlate islet culture days to immune populations
+IsletSup_CultureDays_AllMetrics <- dfBulkSup %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(`Sup-Days`, Value, color = Disease_State)) +
+  geom_jitter(width = 0.2) +
+  scale_color_manual(values = hpapPalette) +
+  theme_classic() +
+  facet_wrap(vars(Metric), scales = "free_y") +
+  theme(strip.text = element_text(size = 6))
+IsletSup_CultureDays_AllMetrics
+```
+
+```{r Islet Supernatant: CD8, CD4, and DN frerquencies}
+
+#percent of CD4+, CD8+, and double negative T cells in islet supernatant
+
+dunn_test(dfBulkSupStats, `CD4+_T_cells` ~ Disease_State)
+dunn_test(dfBulkSupStats, `CD8+_T_cells` ~ Disease_State)
+dunn_test(dfBulkSupStats, DN ~ Disease_State)
+
+IsletSup_percentCD3 <- dfBulkSup %>%
   filter(Metric == "CD4+ T cells" | Metric == "CD8+ T cells" | Metric == "DN") %>%
-  ggplot(aes(x = Metric, y = Value, fill = Disease_State)) +
+  mutate(Metric = str_replace_all(Metric, " T cells", "")) %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(x = Metric, y = Value, fill = Disease_State, shape = Disease_State)) +
   xlab(NULL) +
-  #ylab(ylab) +
-  #scale_y_continuous(limits = c(0,y_scale), expand = c(0,0)) +
-  scale_shape_manual(values = c(21, 22, 23)) +
-  #scale_fill_manual(values = hpapPalette) +
+  ylab("% of T cells") +
+  scale_y_continuous(limits = c(0,100), expand = c(0,0)) +
+  scale_shape_manual(values = hpapShapes) +
+  scale_fill_manual(values = hpapPalette) +
   # add data points
   geom_point(
-    size = 5,
+    size = 1.5,
     color = "grey20",
-    show.legend = TRUE,
-    position = position_jitterdodge(jitter.width = 0.1, 
-                                    dodge.width = 0.5)
+    stroke = 0.2,
+    show.legend = FALSE,
+    position = position_jitterdodge(jitter.width = 0.3, 
+                                    dodge.width = 0.7)
+  ) +
+  # add quartiles
+  stat_summary(
+    geom = "errorbar",
+    position = position_dodge(width = 0.7),
+    fun.min = function(z) {quantile(z, 0.25)},
+    fun.max = function(z) {quantile(z, 0.75)},
+    width = 0.4,
+    linewidth = 0.3) +
+  # add median bar
+  stat_summary(
+    fun = median,
+    position = position_dodge(width = 0.7),
+    geom = "crossbar",
+    width = 0.5,
+    linewidth = 0.2,
+    show.legend = FALSE
+  ) + 
+  #themes
+  theme_classic() +
+  theme(
+    axis.text = element_text(family = "sans", face = "bold", size  = 8, color = "gray0"),
+    axis.title.y.left = element_text(family = "sans", face = "bold", size  = 10, vjust = 2),
+    axis.text.x = element_text(vjust = 0),
+    axis.line = element_line(linewidth =  0.5),
+    axis.ticks = element_line(linewidth = 0.5),
+    plot.title = element_text(hjust = 0.5, vjust = 2, family = "sans", face = "bold", size = 18),
+    plot.margin = unit(c(5, 5, 5, 5), "mm")
   )
 
-percentCD3
+IsletSup_percentCD3
+ggsave("IsletSup_CD4-CD8",
+       plot = IsletSup_percentCD3,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/IsletSup/",
+       device = "pdf",
+       width = 3,
+       height = 2,
+       units = "in")
 ```
 
+```{r Islet Supernatant: CD8+ T cell count exploration}
+IsletSup_CD8_count <- dfBulkSup %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  filter(Metric == "CD8+ T cells Count") %>%
+  ggplot(aes(x = Metric, y = Value, color = Disease_State)) +
+  geom_point() +
+  scale_color_manual(values = hpapPalette) +
+  scale_y_continuous(trans = "log10") +
+  geom_hline(yintercept = 500)
+IsletSup_CD8_count
+
+IsletSup_CD8Count_AllMetrics <- dfBulkSup %>%
+  pivot_wider(names_from = Metric, values_from = Value) %>%
+  relocate("CD8+ T cells Count" ,.after = File_Name) %>%
+  pivot_longer(cols = "Live T cells" : "Bulk Memory CD103+", 
+               names_to = "Metric", values_to = "Value") %>%
+  ggplot(aes(`CD8+ T cells Count`, Value)) +
+  geom_point() +
+  scale_x_continuous(trans = "log10") +
+  theme_classic() +
+  facet_wrap(vars(Metric), scales = "free_y") +
+  theme(strip.text = element_text(size = 6))
+IsletSup_CD8Count_AllMetrics
+```
+
+```{r Islet Supernatant: CD45RA and CCR7}
+dunn_test(dfBulkSupStats, `CD45RA-CCR7-` ~ Disease_State)
+dunn_test(dfBulkSupStats, `CD45RA-CCR7+` ~ Disease_State)
+dunn_test(dfBulkSupStats, `CD45RA+CCR7-` ~ Disease_State)
+dunn_test(dfBulkSupStats, `CD45RA+CCR7+` ~ Disease_State)
+
+IsletSup_RA_CCR7 <- dfBulkSup %>%
+  filter(Metric == "CD45RA-CCR7-" | Metric == "CD45RA-CCR7+" | Metric == "CD45RA+CCR7-" | Metric == "CD45RA+CCR7+") %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(x = Metric, y = Value, fill = Disease_State, shape = Disease_State)) +
+  xlab(NULL) +
+  ylab("% of CD8+ T cells") +
+  scale_y_continuous(limits = c(0,100), expand = c(0,0)) +
+  scale_shape_manual(values = hpapShapes) +
+  scale_fill_manual(values = hpapPalette) +
+  # add data points
+  geom_point(
+    size = 1.5,
+    color = "grey20",
+    stroke = 0.2,
+    show.legend = FALSE,
+    position = position_jitterdodge(jitter.width = 0.3, 
+                                    dodge.width = 0.7)
+  ) +
+  # add quartiles
+  stat_summary(
+    geom = "errorbar",
+    position = position_dodge(width = 0.7),
+    fun.min = function(z) {quantile(z, 0.25)},
+    fun.max = function(z) {quantile(z, 0.75)},
+    width = 0.4,
+    linewidth = 0.3) +
+  # add median bar
+  stat_summary(
+    fun = median,
+    position = position_dodge(width = 0.7),
+    geom = "crossbar",
+    width = 0.5,
+    linewidth = 0.2,
+    show.legend = FALSE
+  ) + 
+  #themes
+  theme_classic() +
+  theme(
+    axis.text = element_text(family = "sans", face = "bold", size  = 8, color = "gray0"),
+    axis.title.y.left = element_text(family = "sans", face = "bold", size  = 10, vjust = 2),
+    axis.text.x = element_text(vjust = 0),
+    axis.line = element_line(linewidth =  0.5),
+    axis.ticks = element_line(linewidth = 0.5),
+    plot.title = element_text(hjust = 0.5, vjust = 2, family = "sans", face = "bold", size = 18),
+    plot.margin = unit(c(5, 5, 5, 5), "mm")
+  )
+
+IsletSup_RA_CCR7
+ggsave("IsletSup_RA-CCR7",
+       plot = IsletSup_RA_CCR7,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/IsletSup/",
+       device = "pdf",
+       width = 3,
+       height = 2,
+       units = "in")
+```
+
+```{r Islet Supernatant: CD69 and CD103}
+dunn_test(dfBulkSupStats, `Bulk_Memory_CD69-CD103-` ~ Disease_State)
+dunn_test(dfBulkSupStats, `Bulk_Memory_CD69-CD103+` ~ Disease_State)
+dunn_test(dfBulkSupStats, `Bulk_Memory_CD69+CD103-` ~ Disease_State)
+dunn_test(dfBulkSupStats, `Bulk_Memory_CD69+CD103+` ~ Disease_State)
+
+IsletSup_CD69_CD103 <- dfBulkSup %>%
+  filter(Metric == "Bulk Memory CD69-CD103-" | Metric == "Bulk Memory CD69-CD103+" | Metric == "Bulk Memory CD69+CD103-" | Metric == "Bulk Memory CD69+CD103+") %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(x = Metric, y = Value, fill = Disease_State, shape = Disease_State)) +
+  xlab(NULL) +
+  ylab("% of Memory CD8+ T cells") +
+  scale_y_continuous(limits = c(0,100), expand = c(0,0)) +
+  scale_shape_manual(values = hpapShapes) +
+  scale_fill_manual(values = hpapPalette) +
+  # add data points
+  geom_point(
+    size = 1.5,
+    color = "grey20",
+    stroke = 0.2,
+    show.legend = FALSE,
+    position = position_jitterdodge(jitter.width = 0.3, 
+                                    dodge.width = 0.7)
+  ) +
+  # add quartiles
+  stat_summary(
+    geom = "errorbar",
+    position = position_dodge(width = 0.7),
+    fun.min = function(z) {quantile(z, 0.25)},
+    fun.max = function(z) {quantile(z, 0.75)},
+    width = 0.4,
+    linewidth = 0.3) +
+  # add median bar
+  stat_summary(
+    fun = median,
+    position = position_dodge(width = 0.7),
+    geom = "crossbar",
+    width = 0.5,
+    linewidth = 0.2,
+    show.legend = FALSE
+  ) + 
+  #themes
+  theme_classic() +
+  theme(
+    axis.text = element_text(family = "sans", face = "bold", size  = 8, color = "gray0"),
+    axis.title.y.left = element_text(family = "sans", face = "bold", size  = 10, vjust = 2),
+    axis.text.x = element_text(vjust = 0),
+    axis.line = element_line(linewidth =  0.5),
+    axis.ticks = element_line(linewidth = 0.5),
+    plot.title = element_text(hjust = 0.5, vjust = 2, family = "sans", face = "bold", size = 18),
+    plot.margin = unit(c(5, 5, 5, 5), "mm")
+  )
+
+IsletSup_CD69_CD103
+ggsave("IsletSup_CD69-CD103",
+       plot = IsletSup_CD69_CD103,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/IsletSup/",
+       device = "pdf",
+       width = 3,
+       height = 2,
+       units = "in")
+```
+
+```{r Islet Supernatant: Tbet and Eomes}
+dunn_test(dfBulkSupStats, `Bulk_Memory_Tbet-Eomes-` ~ Disease_State)
+dunn_test(dfBulkSupStats, `Bulk_Memory_Tbet-Eomes+` ~ Disease_State)
+dunn_test(dfBulkSupStats, `Bulk_Memory_Tbet+Eomes-` ~ Disease_State)
+dunn_test(dfBulkSupStats, `Bulk_Memory_Tbet+Eomes+` ~ Disease_State)
+
+IsletSup_Tbet_Eomes <- dfBulkSup %>%
+  filter(Metric == "Bulk Memory Tbet-Eomes-" | Metric == "Bulk Memory Tbet-Eomes+" | Metric == "Bulk Memory Tbet+Eomes-" | Metric == "Bulk Memory Tbet+Eomes+") %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(x = Metric, y = Value, fill = Disease_State, shape = Disease_State)) +
+  xlab(NULL) +
+  ylab("% of Memory CD8+ T cells") +
+  scale_y_continuous(limits = c(0,100), expand = c(0,0)) +
+  scale_shape_manual(values = hpapShapes) +
+  scale_fill_manual(values = hpapPalette) +
+  # add data points
+  geom_point(
+    size = 1.5,
+    color = "grey20",
+    stroke = 0.2,
+    show.legend = FALSE,
+    position = position_jitterdodge(jitter.width = 0.3, 
+                                    dodge.width = 0.7)
+  ) +
+  # add quartiles
+  stat_summary(
+    geom = "errorbar",
+    position = position_dodge(width = 0.7),
+    fun.min = function(z) {quantile(z, 0.25)},
+    fun.max = function(z) {quantile(z, 0.75)},
+    width = 0.4,
+    linewidth = 0.3) +
+  # add median bar
+  stat_summary(
+    fun = median,
+    position = position_dodge(width = 0.7),
+    geom = "crossbar",
+    width = 0.5,
+    linewidth = 0.2,
+    show.legend = FALSE
+  ) + 
+  #themes
+  theme_classic() +
+  theme(
+    axis.text = element_text(family = "sans", face = "bold", size  = 8, color = "gray0"),
+    axis.title.y.left = element_text(family = "sans", face = "bold", size  = 10, vjust = 2),
+    axis.text.x = element_blank(),
+    axis.line = element_line(linewidth =  0.5),
+    axis.ticks = element_line(linewidth = 0.5),
+    plot.title = element_text(hjust = 0.5, vjust = 2, family = "sans", face = "bold", size = 18),
+    plot.margin = unit(c(5, 5, 5, 5), "mm")
+  )
+
+IsletSup_Tbet_Eomes
+ggsave("IsletSup_Tbet-Eomes",
+       plot = IsletSup_Tbet_Eomes,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/IsletSup/",
+       device = "pdf",
+       width = 3,
+       height = 2,
+       units = "in")
+```
+
+```{r Islet Supernatant: Tbet+Eomes+}
+dunn_test(dfBulkSupStats, `Bulk_Memory_Tbet+Eomes+` ~ Disease_State)
+
+IsletSup_Tbet_Eomes_Pos <- dfBulkSup %>%
+  filter(Metric == "Bulk Memory Tbet+Eomes+") %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(x = Metric, y = Value, fill = Disease_State, shape = Disease_State)) +
+  xlab(NULL) +
+  ylab("% of Memory CD8+ T cells") +
+  scale_y_continuous(limits = c(0,100), expand = c(0,0)) +
+  scale_shape_manual(values = hpapShapes) +
+  scale_fill_manual(values = hpapPalette) +
+  # add data points
+  geom_point(
+    size = 1.5,
+    color = "grey20",
+    stroke = 0.2,
+    show.legend = FALSE,
+    position = position_jitterdodge(jitter.width = 0.3, 
+                                    dodge.width = 1)
+  ) +
+  # add quartiles
+  stat_summary(
+    geom = "errorbar",
+    position = position_dodge(width = 1),
+    fun.min = function(z) {quantile(z, 0.25)},
+    fun.max = function(z) {quantile(z, 0.75)},
+    width = 0.4,
+    linewidth = 0.3) +
+  # add median bar
+  stat_summary(
+    fun = median,
+    position = position_dodge(width = 1),
+    geom = "crossbar",
+    width = 0.5,
+    linewidth = 0.2,
+    show.legend = FALSE
+  ) + 
+  #themes
+  theme_classic() +
+  theme(
+    axis.text = element_text(family = "sans", face = "bold", size  = 8, color = "gray0"),
+    axis.title.y.left = element_text(family = "sans", face = "bold", size  = 10, vjust = 2),
+    axis.text.x = element_blank(),
+    axis.line = element_line(linewidth =  0.5),
+    axis.ticks = element_line(linewidth = 0.5),
+    plot.title = element_text(hjust = 0.5, vjust = 2, family = "sans", face = "bold", size = 18),
+    plot.margin = unit(c(5, 5, 5, 5), "mm")
+  )
+
+IsletSup_Tbet_Eomes_Pos
+ggsave("IsletSup_Tbet+Eomes+",
+       plot = IsletSup_Tbet_Eomes_Pos,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/IsletSup/",
+       device = "pdf",
+       width = 1.5,
+       height = 2,
+       units = "in")
+```
+
+```{r Islet Supernatant: Perforin and GranzymeB}
+dunn_test(dfBulkSupStats, `Bulk_Memory_GrzB-Perf-` ~ Disease_State)
+dunn_test(dfBulkSupStats, `Bulk_Memory_GrzB-Perf+` ~ Disease_State)
+dunn_test(dfBulkSupStats, `Bulk_Memory_GrzB+Perf-` ~ Disease_State)
+dunn_test(dfBulkSupStats, `Bulk_Memory_GrzB+Perf+` ~ Disease_State)
+
+IsletSup_Prf_GrzB <- dfBulkSup %>%
+  filter(Metric == "Bulk Memory GrzB-Perf-" | Metric == "Bulk Memory GrzB-Perf+" | Metric == "Bulk Memory GrzB+Perf-" | Metric == "Bulk Memory GrzB+Perf+") %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(x = Metric, y = Value, fill = Disease_State, shape = Disease_State)) +
+  xlab(NULL) +
+  ylab("% of Memory CD8+ T cells") +
+  scale_y_continuous(limits = c(0,100), expand = c(0,0)) +
+  scale_shape_manual(values = hpapShapes) +
+  scale_fill_manual(values = hpapPalette) +
+  # add data points
+  geom_point(
+    size = 1.5,
+    color = "grey20",
+    stroke = 0.2,
+    show.legend = FALSE,
+    position = position_jitterdodge(jitter.width = 0.3, 
+                                    dodge.width = 0.7)
+  ) +
+  # add quartiles
+  stat_summary(
+    geom = "errorbar",
+    position = position_dodge(width = 0.7),
+    fun.min = function(z) {quantile(z, 0.25)},
+    fun.max = function(z) {quantile(z, 0.75)},
+    width = 0.4,
+    linewidth = 0.3) +
+  # add median bar
+  stat_summary(
+    fun = median,
+    position = position_dodge(width = 0.7),
+    geom = "crossbar",
+    width = 0.5,
+    linewidth = 0.2,
+    show.legend = FALSE
+  ) + 
+  #themes
+  theme_classic() +
+  theme(
+    axis.text = element_text(family = "sans", face = "bold", size  = 8, color = "gray0"),
+    axis.title.y.left = element_text(family = "sans", face = "bold", size  = 10, vjust = 2),
+    axis.text.x = element_blank(),
+    axis.line = element_line(linewidth =  0.5),
+    axis.ticks = element_line(linewidth = 0.5),
+    plot.title = element_text(hjust = 0.5, vjust = 2, family = "sans", face = "bold", size = 18),
+    plot.margin = unit(c(5, 5, 5, 5), "mm")
+  )
+
+IsletSup_Prf_GrzB
+ggsave("IsletSup_Perf-GrzB",
+       plot = IsletSup_Prf_GrzB,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/IsletSup/",
+       device = "pdf",
+       width = 3,
+       height = 2,
+       units = "in")
+```
+
+```{r Islet Supernatant: Perf+GrzB+}
+dunn_test(dfBulkSupStats, `Bulk_Memory_GrzB+Perf+` ~ Disease_State)
+
+IsletSup_Prf_GrzB_Pos <- dfBulkSup %>%
+  filter(Metric == "Bulk Memory GrzB+Perf+") %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(x = Metric, y = Value, fill = Disease_State, shape = Disease_State)) +
+  xlab(NULL) +
+  ylab("% of Memory CD8+ T cells") +
+  scale_y_continuous(limits = c(0,25), expand = c(0,0)) +
+  scale_shape_manual(values = hpapShapes) +
+  scale_fill_manual(values = hpapPalette) +
+  # add data points
+  geom_point(
+    size = 1.5,
+    color = "grey20",
+    stroke = 0.2,
+    show.legend = FALSE,
+    position = position_jitterdodge(jitter.width = 0.3, 
+                                    dodge.width = 1)
+  ) +
+  # add quartiles
+  stat_summary(
+    geom = "errorbar",
+    position = position_dodge(width = 1),
+    fun.min = function(z) {quantile(z, 0.25)},
+    fun.max = function(z) {quantile(z, 0.75)},
+    width = 0.4,
+    linewidth = 0.3) +
+  # add median bar
+  stat_summary(
+    fun = median,
+    position = position_dodge(width = 1),
+    geom = "crossbar",
+    width = 0.5,
+    linewidth = 0.2,
+    show.legend = FALSE
+  ) + 
+  #themes
+  theme_classic() +
+  theme(
+    axis.text = element_text(family = "sans", face = "bold", size  = 8, color = "gray0"),
+    axis.title.y.left = element_text(family = "sans", face = "bold", size  = 10, vjust = 2),
+    axis.text.x = element_blank(),
+    axis.line = element_line(linewidth =  0.5),
+    axis.ticks = element_line(linewidth = 0.5),
+    plot.title = element_text(hjust = 0.5, vjust = 2, family = "sans", face = "bold", size = 18),
+    plot.margin = unit(c(5, 5, 5, 5), "mm")
+  )
+
+
+IsletSup_Prf_GrzB_Pos
+ggsave("IsletSup_Perf+GrzB+",
+       plot = IsletSup_Prf_GrzB_Pos,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/IsletSup/",
+       device = "pdf",
+       width = 1.5,
+       height = 2,
+       units = "in")
+```
+
+```{r Islet Supernatant: Ki67}
+dunn_test(dfBulkSupStats, `Bulk_Memory_Ki67+` ~ Disease_State)
+
+Ki67_test <- dfBulkSup %>%
+  filter(Metric == "Bulk Memory Ki67+")
+
+IsletSup_Ki67 <- dfBulkSup %>%
+  filter(Metric == "Bulk Memory Ki67+") %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(x = Metric, y = Value, fill = Disease_State, shape = Disease_State)) +
+  xlab(NULL) +
+  ylab("% of Memory CD8+ T cells") +
+  scale_y_continuous(limits = c(0,40), expand = c(0,0)) +
+  scale_shape_manual(values = hpapShapes) +
+  scale_fill_manual(values = hpapPalette) +
+  # add data points
+  geom_point(
+    size = 1.5,
+    color = "grey20",
+    stroke = 0.2,
+    show.legend = FALSE,
+    position = position_jitterdodge(jitter.width = 0.3, 
+                                    dodge.width = 1)
+  ) +
+  # add quartiles
+  stat_summary(
+    geom = "errorbar",
+    position = position_dodge(width = 1),
+    fun.min = function(z) {quantile(z, 0.25)},
+    fun.max = function(z) {quantile(z, 0.75)},
+    width = 0.4,
+    linewidth = 0.3) +
+  # add median bar
+  stat_summary(
+    fun = median,
+    position = position_dodge(width = 1),
+    geom = "crossbar",
+    width = 0.5,
+    linewidth = 0.2,
+    show.legend = FALSE
+  ) + 
+  #themes
+  theme_classic() +
+  theme(
+    axis.text = element_text(family = "sans", face = "bold", size  = 8, color = "gray0"),
+    axis.title.y.left = element_text(family = "sans", face = "bold", size  = 10, vjust = 2),
+    axis.text.x = element_blank(),
+    axis.line = element_line(linewidth =  0.5),
+    axis.ticks = element_line(linewidth = 0.5),
+    plot.title = element_text(hjust = 0.5, vjust = 2, family = "sans", face = "bold", size = 18),
+    plot.margin = unit(c(5, 5, 5, 5), "mm")
+  )
+
+IsletSup_Ki67
+ggsave("IsletSup_Ki67",
+       plot = IsletSup_Ki67,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/IsletSup/",
+       device = "pdf",
+       width = 1.5,
+       height = 2,
+       units = "in")
+```
+
+```{r Islet Supernatant: CD27}
+dunn_test(dfBulkSupStats, `Bulk_Memory_CD27+` ~ Disease_State)
+
+IsletSup_CD27 <- dfBulkSup %>%
+  filter(Metric == "Bulk Memory CD27+") %>%
+  mutate(Disease_State = fct_relevel(Disease_State, "ND", "AAb+", "T1D")) %>%
+  ggplot(aes(x = Metric, y = Value, fill = Disease_State, shape = Disease_State)) +
+  xlab(NULL) +
+  ylab("% of Memory CD8+ T cells") +
+  scale_y_continuous(limits = c(0,60), expand = c(0,0)) +
+  scale_shape_manual(values = hpapShapes) +
+  scale_fill_manual(values = hpapPalette) +
+  # add data points
+  geom_point(
+    size = 1.5,
+    color = "grey20",
+    stroke = 0.2,
+    show.legend = FALSE,
+    position = position_jitterdodge(jitter.width = 0.3, 
+                                    dodge.width = 0.7)
+  ) +
+  # add quartiles
+  stat_summary(
+    geom = "errorbar",
+    position = position_dodge(width = 0.7),
+    fun.min = function(z) {quantile(z, 0.25)},
+    fun.max = function(z) {quantile(z, 0.75)},
+    width = 0.4,
+    linewidth = 0.3) +
+  # add median bar
+  stat_summary(
+    fun = median,
+    position = position_dodge(width = 0.7),
+    geom = "crossbar",
+    width = 0.5,
+    linewidth = 0.2,
+    show.legend = FALSE
+  ) + 
+  #themes
+  theme_classic() +
+  theme(
+    axis.text = element_text(family = "sans", face = "bold", size  = 8, color = "gray0"),
+    axis.title.y.left = element_text(family = "sans", face = "bold", size  = 10, vjust = 2),
+    axis.text.x = element_blank(),
+    axis.line = element_line(linewidth =  0.5),
+    axis.ticks = element_line(linewidth = 0.5),
+    plot.title = element_text(hjust = 0.5, vjust = 2, family = "sans", face = "bold", size = 18),
+    plot.margin = unit(c(5, 5, 5, 5), "mm")
+  )
+
+IsletSup_CD27
+ggsave("IsletSup_CD27",
+       plot = IsletSup_CD27,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/IsletSup/",
+       device = "pdf",
+       width = 3,
+       height = 2,
+       units = "in")
+```
+
+```{r}
+
+```
 
