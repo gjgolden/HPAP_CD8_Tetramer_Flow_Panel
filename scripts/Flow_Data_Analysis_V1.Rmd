@@ -19,10 +19,12 @@ library(stringr)
 library(forcats)
 library(ggplot2)
 library(rstatix)
+library(ggpubr)
 ```
 
 2. Data Import, Cleaning, Computing, and Subsetting
 ```{r Data Import, Cleaning, and Subsetting}
+#Import Primary Dataset
 df <- read.csv("./data/Primary_Data.csv", 
                check.names = FALSE,
                stringsAsFactors = FALSE)
@@ -32,9 +34,16 @@ df <- as_tibble(df) %>%
                 .fns = function(x) str_replace_all(x, "%", ""))) %>%
   mutate(across(.cols = "Live T cells":ncol(df),
                 .fns = function(x) as.numeric(x))) %>%
-  rename(`Bulk Memory GrzB+Perf+` = `Bulk Memory GrzB+Perfr+`)
+  rename(`Bulk Memory GrzB+Perf+` = `Bulk Memory GrzB+Perfr+`) %>%
+  rename(`Tet-PE+ GrzB+Perf+` = `Tet-PE+ GrzB+Perfr+`)
 
-#compute CD4/CD8 T cell ratio and single positive marker frerquencies
+#Import Previous Lab Member's Dataset
+dfAlb <- read.csv("./data/Alberto_A2_Tetramer_Master.csv",
+                  check.names = FALSE,
+                  stringsAsFactors = FALSE)
+dfAlb <- as_tibble(dfAlb)
+
+#compute CD4/CD8 T cell ratio and single positive marker frequencies
 df <- df %>% 
   mutate("CD4/CD8 Ratio" = `CD4+ T cells`/`CD8+ T cells`) %>%
   mutate("Bulk Memory CCR7+" = `Bulk Memory CD45RA-CCR7+` + `Bulk Memory CD45RA+CCR7+`) %>%
@@ -51,6 +60,64 @@ dfBulk <- df %>%
   select(!starts_with("Tet-", ignore.case = TRUE)) %>%
   filter(Tet_Mix == "A" | Tet_Mix == "None" | Tet_Mix == "Combo") %>%
   select(-"Bulk Memory CD45RA+ 2")
+
+#create a table for non-islet supernatant samples stained with tetramers
+dfTet <- df %>%
+  filter(!Tissue == "Islet-Sup") %>%
+  filter(!Tet_Mix == "None")
+
+#create a table for comparing tetramer positive rates across tissue (and a table for statistics)
+dfTetPE <- dfTet %>%
+  select(1:"Notes" | "Tet-PE+":"Tet-PE+ CD27+") %>%
+  select(!"Antigen-BV421") %>%
+  rename("Antigen" = "Antigen-PE") %>%
+  rename("TetPos" = "Tet-PE+") %>%
+  mutate("Fluor" = "PE") %>%
+  relocate("Fluor", .after = Antigen) %>%
+  rename_with(~ gsub("Tet-PE", "Tet", .x))
+
+dfTetBV421 <- dfTet %>%
+  select(1:"Notes" | "Tet-BV421+":"Tet-BV421+ CD27+") %>%
+  select(!"Antigen-PE") %>%
+  rename("Antigen" = "Antigen-BV421") %>% 
+  rename("TetPos" = "Tet-BV421+") %>%
+  mutate("Fluor" = "BV421") %>%
+  relocate("Fluor", .after = Antigen) %>%
+  rename_with(~ gsub("Tet-BV421", "Tet", .x))
+
+dfTetMerge <- full_join(dfTetPE, dfTetBV421) %>%
+  mutate(Antigen_Type = case_when(Antigen == "EBV" ~ "EBV",
+        TRUE ~ "Islet")) %>%
+  relocate(Antigen_Type, .after = Fluor)
+
+spleenTetDonors <- dfTetMerge %>%
+  filter(Tissue == "Spleen") %>%
+  filter(TetPos > 0.001) %>%
+  select(Donor_ID, Tet_Mix, Antigen, Fluor)
+spleenTetDonors <- distinct(spleenTetDonors)
+
+dfTetSpleen <- spleenTetDonors %>%
+  left_join(dfTetMerge) %>%
+  group_by(Donor_ID, Antigen, Fluor, Tissue) %>%
+  summarise(tetSpleen = TetPos[Tissue == "Spleen"])
+
+dfTetCrossTissue <- dfTetSpleen %>%
+  left_join(dfTetMerge, by = c("Donor_ID", "Antigen", "Fluor")) %>%
+  rename("Tissue" = "Tissue.y") %>%
+  select(!`Tissue.x`) %>%
+  mutate("EnrichOverSpleen" = TetPos/tetSpleen) %>%
+  pivot_longer(cols = TetPos:ncol(.), 
+               names_to = "Metric", values_to = "Value") %>%
+  as_tibble()
+
+dfTetCrossTissueStats <- dfTetCrossTissue %>%
+  pivot_wider(names_from = Metric, values_from = Value) %>%
+  filter(Tissue != "PBMC") %>%
+  filter(Antigen != "MelanA") %>%
+  filter(TetPos > 0)
+colnames(dfTetCrossTissueStats) <- gsub(" ", "_", colnames(dfTetCrossTissueStats))
+
+#
 
 #create a table of islet supernatants to keep. Filtered CD8+ T cell count >= 100 and the highest islet purity available. Also create a duplicate table compatible with statistical comparison packages.
 dfBulkSup <- dfBulk %>%
@@ -88,7 +155,120 @@ hpapShapes <- c(21, 22, 23)
 hpapDiseaseLevels <- factor(c("ND", "AAb+", "T1D"), levels = c("ND", "AAb+", "T1D"))
 ```
 
-4. Islet Supernatant Plots
+4. CD8+ T cell phenotype across tissues
+
+```{r Tissue Phenotypes: all gates}
+TissuePheno_AllGates <- dfBulk %>%
+  mutate(Tissue = fct_relevel(Tissue, "PBMC","Spleen", "LN_SMA", "LN_MES", "pLN_Head", "pLN_Body", "pLN_Tail", "Islet-Sup")) %>%
+  ggplot(aes(Tissue, Value)) +
+  geom_violin() +
+  facet_wrap(vars(Metric), scales = "free_y") +
+  theme(strip.text = element_text(size = 6))
+  
+TissuePheno_AllGates
+```
+
+```{r Tissue Phenotypes: CD4/CD8 ratio}
+TissuePheno_CD4_CD8_ratio <- dfBulk %>%
+  filter(Metric == "CD4/CD8 Ratio") %>%
+  mutate(Tissue = fct_relevel(Tissue, "PBMC","Spleen", "LN_SMA", "LN_MES", "pLN_Head", "pLN_Body", "pLN_Tail", "Islet-Sup")) %>%
+  ggplot(aes(Tissue, Value)) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+  geom_jitter(width = 0.3,size = 0.5) +
+  ylab("CD4/CD8 Ratio") +
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.y = element_text(size = 8)
+  )
+  
+TissuePheno_CD4_CD8_ratio
+ggsave("TissuePheno_CD4_CD8_ratio",
+       plot = TissuePheno_CD4_CD8_ratio,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/TissuePheno/",
+       device = "pdf",
+       width = 4,
+       height = 2,
+       units = "in")
+```
+
+```{r Tissue Phenotypes: % of memory CD8s}
+TissuePheno_memoryCD8s <- dfBulk %>%
+  filter(Metric == "Bulk Memory") %>%
+  mutate(Tissue = fct_relevel(Tissue, "PBMC","Spleen", "LN_SMA", "LN_MES", "pLN_Head", "pLN_Body", "pLN_Tail", "Islet-Sup")) %>%
+  ggplot(aes(Tissue, Value)) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+  geom_jitter(width = 0.3,size = 0.5) +
+  ylab("% memory CD8+ T cells") +
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.y = element_text(size = 8)
+  )
+
+TissuePheno_memoryCD8s
+ggsave("TissuePheno_memoryCD8s",
+       plot = TissuePheno_memoryCD8s,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/TissuePheno/",
+       device = "pdf",
+       width = 4,
+       height = 2,
+       units = "in")
+```
+
+```{r Tissue Phenotypes: %CD69 of memory CD8s}
+TissuePheno_memCD8_CD69 <- dfBulk %>%
+  filter(Metric == "Bulk Memory CD69+") %>%
+  mutate(Tissue = fct_relevel(Tissue, "PBMC","Spleen", "LN_SMA", "LN_MES", "pLN_Head", "pLN_Body", "pLN_Tail", "Islet-Sup")) %>%
+  ggplot(aes(Tissue, Value)) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+  geom_jitter(width = 0.3,size = 0.5) +
+  ylab("%CD69+ memory CD8+ T cells") +
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.y = element_text(size = 7)
+  )
+
+TissuePheno_memCD8_CD69
+ggsave("TissuePheno_memCD8_CD69",
+       plot = TissuePheno_memCD8_CD69,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/TissuePheno/",
+       device = "pdf",
+       width = 4,
+       height = 2,
+       units = "in")
+```
+
+```{r Tissue Phenotypes: %CD69+CD103+ of memory CD8s}
+TissuePheno_memCD8_CD69CD103 <- dfBulk %>%
+  filter(Metric == "Bulk Memory CD69+CD103+") %>%
+  mutate(Tissue = fct_relevel(Tissue, "PBMC","Spleen", "LN_SMA", "LN_MES", "pLN_Head", "pLN_Body", "pLN_Tail", "Islet-Sup")) %>%
+  ggplot(aes(Tissue, Value)) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+  geom_jitter(width = 0.3,size = 0.5) +
+  ylab("%CD69+CD103+ memory CD8+ T cells") +
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.y = element_text(size = 6)
+  )
+
+TissuePheno_memCD8_CD69CD103
+ggsave("TissuePheno_memCD8_CD69_CD103",
+       plot = TissuePheno_memCD8_CD69CD103,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/TissuePheno/",
+       device = "pdf",
+       width = 4,
+       height = 2,
+       units = "in")
+```
+
+5. Islet Supernatant Plots
 ```{r Islet Supernatant: Comparing all immune populations to donor metrics}
 #Correlate age to immune populations
 IsletSup_Age_AllMetrics <- dfBulkSup %>%
@@ -294,6 +474,10 @@ ggsave("IsletSup_RA-CCR7",
 ```
 
 ```{r Islet Supernatant: CD69 and CD103}
+IsletSup_CD69 <- dfBulkSup %>%
+  filter(Metric == "Bulk Memory CD69+") %>%
+  arrange(Value)
+
 dunn_test(dfBulkSupStats, `Bulk_Memory_CD69-CD103-` ~ Disease_State)
 dunn_test(dfBulkSupStats, `Bulk_Memory_CD69-CD103+` ~ Disease_State)
 dunn_test(dfBulkSupStats, `Bulk_Memory_CD69+CD103-` ~ Disease_State)
@@ -354,6 +538,68 @@ ggsave("IsletSup_CD69-CD103",
        width = 3,
        height = 2,
        units = "in")
+```
+
+```{r Islet Supernatant: CD69lo versus CD69hi}
+#create df for comparing CD69 level to other flow populations
+dfCD69bin <- dfBulkSup %>%
+  pivot_wider(names_from = "Metric", values_from = "Value") %>%
+  mutate(CD69level = case_when(`Bulk Memory CD69+` <= 28 ~ "CD69lo",
+                               `Bulk Memory CD69+` > 28 ~ "CD69hi")) %>%
+  relocate(CD69level, .after = File_Name) %>%
+  pivot_longer(cols = "CD8+ T cells Count" : ncol(.), 
+               names_to = "Metric", 
+               values_to = "Value")
+
+CD69binFlowMetrics <- dfCD69bin %>%
+  ggplot(aes(CD69level, Value, shape = CD69level)) +
+  geom_jitter(width = 0.3) +
+  theme_classic() +
+  facet_wrap(vars(Metric), scales = "free_y") +
+  theme(strip.text = element_text(size = 6))
+CD69binFlowMetrics
+
+#create df for comparing CD69 level to donor metrics
+dfCD69binDonors <- dfBulkSup %>%
+  pivot_wider(names_from = "Metric", values_from = "Value") %>%
+  mutate(CD69level = case_when(`Bulk Memory CD69+` <= 28 ~ "CD69lo",
+                               `Bulk Memory CD69+` > 28 ~ "CD69hi")) %>%
+  relocate(CD69level, .after = File_Name) %>%
+  select(Donor_ID, Disease_State, `Sup-Days`, Sex, Age, AAb_N, CD69level) %>%
+  pivot_longer(cols = Disease_State:ncol(.),
+               names_to = "Metric",
+               values_to = "Value")
+
+CD69binAge <- dfCD69binDonors %>% #Donor Age
+  ggplot(aes(CD69level, Age, shape = CD69level)) +
+  geom_jitter(width = 0.3) +
+  theme_classic()
+CD69binAge
+
+CD69binDisease <- dfCD69binDonors %>% #Disease State
+  ggplot(aes(CD69level, fill = Disease_State)) +
+  geom_bar(width = 0.3) +
+  theme_classic()
+CD69binDisease
+
+CD69binDays <- dfCD69binDonors %>% #Donor Age
+  ggplot(aes(CD69level, `Sup-Days`, shape = CD69level)) +
+  geom_jitter(width = 0.2) +
+  theme_classic()
+CD69binDays
+
+CD69binSex <- dfCD69binDonors %>% #Sex
+  ggplot(aes(CD69level, fill = Sex)) +
+  geom_bar(width = 0.3) +
+  theme_classic()
+CD69binSex
+
+CD69binAab <- dfCD69binDonors %>% #AAbs
+  mutate(AAb_N = as.character(AAb_N)) %>%
+  ggplot(aes(CD69level, fill = AAb_N)) +
+  geom_bar(width = 0.3) +
+  theme_classic()
+CD69binAab
 ```
 
 ```{r Islet Supernatant: Tbet and Eomes}
@@ -726,7 +972,191 @@ ggsave("IsletSup_CD27",
        units = "in")
 ```
 
-```{r}
+6. Beta cell specific CD8+ T cells
+```{r Creating Old Figures to Verify Reproducibility}
+#Fold Enrichment of Tetramer+ Rate over Spleen - Alberto Data
+spleenTetDonorsAlb <- dfAlb %>%
+  filter(Type == "isletAg" | Type == "viral_EBV") %>%
+  filter(Tissue == "Spleen")
+spleenTetDonorsAlb <- unique(spleenTetDonorsAlb$DonorID)
 
+dfAlbTetSpleen <- dfAlb %>%
+  filter(Type == "isletAg" | Type == "viral_EBV") %>%
+  filter(DonorID %in% spleenTetDonorsAlb) %>%
+  group_by(DonorID, Antigen, Tissue) %>%
+  summarise(tetSpleen = Tetramer_ofCD8[Tissue == "Spleen"])
+
+dfAlbTetCrossTissue <- dfAlb %>%
+  filter(Type == "isletAg" | Type == "viral_EBV") %>%
+  filter(DonorID %in% spleenTetDonorsAlb) %>%
+  left_join(dfAlbTetSpleen, by = c("DonorID", "Antigen")) %>%
+  rename("Tissue" = "Tissue.x") %>%
+  select(!`Tissue.y`) %>%
+  filter(!is.na(tetSpleen)) %>%
+  mutate("EnrichOverSpleen" = Tetramer_ofCD8/tetSpleen) %>%
+  mutate("Tetramer_ofCD8_Log10" = log10())
+  pivot_longer(cols = Tetramer_ofCD8:ncol(.), names_to = "Metric", values_to = "Value")
+
+AlbTetCrossTissue <- dfAlbTetCrossTissue %>%
+  filter(Metric == "Tetramer_ofCD8") %>%
+  filter(Tissue != "PBMC") %>%
+  filter(Antigen != "EBV_GL9") %>%
+  mutate(Tissue = fct_relevel(Tissue, "Spleen", "SMALN", "MesLN", "PanHeadLN", "PanBodyLN", "PanTailLN")) %>%
+  ggplot(aes(Tissue, Value)) +
+  geom_jitter(width = 0.3) +
+  scale_y_continuous(trans = "log10")
+AlbTetCrossTissue
+```
+
+```{r Tetramer+ Rate Across Tissues}
+tissue_order <- c("Spleen", "LN_SMA", "LN_MES", "pLN_Head", "pLN_Body", "pLN_Tail")
+tissue_orderNoSpl <- c("LN_SMA", "LN_MES", "pLN_Head", "pLN_Body", "pLN_Tail")
+
+dfTetCrossTissueStats %>%
+  filter(Antigen != "EBV") %>%
+  dunn_test(TetPos ~ Tissue)
+
+TetCrossTissue <- dfTetCrossTissue %>%
+  filter(Metric == "TetPos") %>%
+  filter(Tissue != "PBMC") %>%
+  filter(Antigen != "EBV") %>%
+  filter(Antigen != "MelanA") %>%
+  filter(Value > 0) %>%
+  ggplot(aes(Tissue, Value)) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+  geom_jitter(width = 0.3,size = 0.5) +
+  scale_x_discrete(limits = tissue_order) +
+  scale_y_continuous(trans = "log10") +
+  ylab("% Tet+ of CD8+ T cells") + 
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.y = element_text(size = 7)
+  )
+TetCrossTissue
+
+ggsave("TetTrm_Freq",
+       plot = TetCrossTissue,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/TetTrm/",
+       device = "pdf",
+       width = 4,
+       height = 2,
+       units = "in")
+
+#using new data but on old lab member's samples in figures
+spleenTetDonorsAlb <- gsub("P0", "P-0", spleenTetDonorsAlb)
+
+TetCrossTissueAlbFilter <- dfTetCrossTissue %>%
+  filter(Donor_ID %in% spleenTetDonorsAlb) %>%
+  filter(Antigen != "GAD65") %>%
+  filter(Antigen != "PPI") %>%
+  filter(Antigen != "IAPP") %>%
+  filter(Metric == "TetPos") %>%
+  filter(Tissue != "PBMC") %>%
+  filter(Antigen != "EBV") %>%
+  filter(Antigen != "MelanA") %>%
+  filter(Value > 0) %>%
+  ggplot(aes(Tissue, Value)) +
+  geom_jitter(width = 0.3) +
+  scale_x_discrete(limits = tissue_order) +
+  scale_y_continuous(trans = "log10")
+TetCrossTissueAlbFilter
+```
+
+```{r Tetramer Frequency Across Tissues: Normalize to Spleen}
+#test for normalcy in distribution
+dfTetCrossTissueStats %>%
+  filter(Tissue == "pLN_Head") %>%
+  filter(Antigen_Type == "Islet") %>%
+  shapiro_test(EnrichOverSpleen) #all LN and EBV antigen groups across tissues non-normal
+#non-parametric T-test (Wilcoxon test) adjusting for multiple comparisons
+compare_means(EnrichOverSpleen ~ Antigen_Type,
+              dfTetCrossTissueStatsNoSpleen,
+              method = "wilcox.test",
+              group.by = "Tissue",
+              p.adjust.method = "holm")
+
+#overall significance of islet tetramer frequency compared to EBV
+dunn_test(dfTetCrossTissueStats, EnrichOverSpleen ~ Antigen_Type)
+
+#plotting islet tetramer enrichment in LN over EBV
+TetCrossTissueNorm <- dfTetCrossTissue %>% 
+  filter(Metric == "EnrichOverSpleen") %>%
+  filter(Tissue != "PBMC") %>%
+  filter(Tissue != "Spleen") %>%
+  filter(Value > 0) %>%
+  filter(Value < 50) %>% #massive pLN_Body outlier at value of 60
+  mutate(Tissue = fct_relevel(Tissue, "LN_SMA", "LN_MES", "pLN_Head", "pLN_Body", "pLN_Tail")) %>%
+  ggplot(aes(Tissue, Value, color = Antigen_Type)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey") +
+  geom_boxplot(width = 0.8,
+               outlier.shape = NA) +
+  geom_point(
+    size = 1,
+    stroke = 0.2,
+    alpha = 0.4,
+    show.legend = FALSE,
+    position = position_jitterdodge(jitter.width = 0.3, 
+                                    dodge.width = 0.8)) +
+  scale_color_manual(values = c("grey30", "red")) +
+  ylab("LN %Tet+ / Spleen %Tet+") + 
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.y = element_text(size = 7),
+    legend.position = "none"
+  )
+TetCrossTissueNorm
+
+ggsave("TetTrm_LN-Enriched",
+       plot = TetCrossTissueNorm,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/TetTrm/",
+       device = "pdf",
+       width = 3,
+       height = 2,
+       units = "in")
+```
+Note: HPAP-025 with high IGRP-265 tetramer also had the highest levels of EBV tetramer enrichment, perhaps indicating that their T cells were just more sticky
+```{r %CD69+CD103+ of Tetramer+}
+compare_means(`Tet+_CD69+CD103+` ~ Antigen_Type,
+              dfTetCrossTissueStats,
+              method = "wilcox.test",
+              group.by = "Tissue",
+              p.adjust.method = "holm")
+
+Islet_EBV_CD69CD103 <- dfTetCrossTissue %>% 
+  filter(Metric == "Tet+ CD69+CD103+") %>%
+  filter(Tissue != "PBMC") %>%
+  mutate(Tissue = fct_relevel(Tissue, "Spleen", "LN_SMA", "LN_MES", "pLN_Head", "pLN_Body", "pLN_Tail")) %>%
+  ggplot(aes(Tissue, Value, color = Antigen_Type)) +
+  geom_boxplot(width = 0.8,
+               outlier.shape = NA) +
+  geom_point(
+    size = 1,
+    stroke = 0.2,
+    alpha = 0.4,
+    show.legend = FALSE,
+    position = position_jitterdodge(jitter.width = 0.3, 
+                                    dodge.width = 0.8)) +
+  scale_color_manual(values = c("grey30", "red")) +
+  ylab("%CD69+CD103+ of Tetramer+") + 
+  theme_classic() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.y = element_text(size = 7),
+    legend.position = "none"
+  )
+Islet_EBV_CD69CD103
+
+ggsave("TetTrm_Islet-EBV-CD69+CD103+",
+       plot = Islet_EBV_CD69CD103,
+       path = "~/Betts_Code/HPAP_CD8_Tetramer_Flow_Panel/outs/TetTrm/",
+       device = "pdf",
+       width = 3,
+       height = 2,
+       units = "in")
 ```
 
